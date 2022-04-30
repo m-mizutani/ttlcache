@@ -8,15 +8,15 @@ type (
 	tick uint64
 )
 
-// Cache is TTL cache table. It needs to be created by `New` function.
-type Cache[K comparable, V any] struct {
+// CacheTable is TTL cache table. It needs to be created by `New` function.
+type CacheTable[K comparable, V any] struct {
 	current     tick
 	bucketMutex sync.RWMutex
 	hookMutex   sync.RWMutex
 
 	bucket    map[K]*node[K, V]
-	timeSlots []*timeSlot[K, V]
 	hooks     map[HookID]Hook[V]
+	timeTable *timeTable[K, V]
 
 	baseHookID HookID
 
@@ -24,24 +24,16 @@ type Cache[K comparable, V any] struct {
 }
 
 type config struct {
-	noExtend    bool
+	extendByGet bool
 	noOverwrite bool
-	ttl         tick
 }
 
 type Option func(cfg *config)
 
-// WithTTL changes time (tick) to live. If you set 4, Elapse(4) will expires cache.
-func WithTTL(ttl uint64) Option {
+// WithExtendByGet enables auto TTL extend when accessing the item by `Get`
+func WithExtendByGet() Option {
 	return func(cfg *config) {
-		cfg.ttl = tick(ttl)
-	}
-}
-
-// WithNoExtend stops to extend TTL of value by `Get`
-func WithNoExtend() Option {
-	return func(cfg *config) {
-		cfg.noExtend = true
+		cfg.extendByGet = true
 	}
 }
 
@@ -53,32 +45,29 @@ func WithNoOverwrite() Option {
 }
 
 // New creates a new `Cache` instance with types K and V. K is for key and V is for value.
-func New[K comparable, V any](options ...Option) *Cache[K, V] {
-	cfg := &config{
-		ttl: 300,
-	}
+func New[K comparable, V any](options ...Option) *CacheTable[K, V] {
+	cfg := &config{}
 
 	for _, opt := range options {
 		opt(cfg)
 	}
 
-	cache := &Cache[K, V]{
+	cache := &CacheTable[K, V]{
 		cfg:       cfg,
 		bucket:    make(map[K]*node[K, V]),
-		timeSlots: make([]*timeSlot[K, V], cfg.ttl),
 		hooks:     make(map[HookID]Hook[V]),
-	}
-	for i := range cache.timeSlots {
-		cache.timeSlots[i] = newTimeSlot[K, V]()
+		timeTable: newTimeTable[K, V](),
 	}
 
 	return cache
 }
 
-// Set inserts a value to cache with predefined TTL. If key already exists, value will be overwritten by default. It always returns `true`, but it returns `false` if WithNoOverwrite enabled and the key already exists.
-func (x *Cache[K, V]) Set(key K, value V) bool {
+// Set inserts a value to cache with `ttl`. If key already exists, value will be overwritten by default. It always returns `true`, but it returns `false` if WithNoOverwrite enabled and the key already exists.
+func (x *CacheTable[K, V]) Set(key K, value V, ttl uint64) bool {
 	x.bucketMutex.Lock()
 	defer x.bucketMutex.Unlock()
+
+	ttlTick := tick(ttl)
 
 	if n, ok := x.bucket[key]; ok {
 		if x.cfg.noOverwrite {
@@ -87,14 +76,16 @@ func (x *Cache[K, V]) Set(key K, value V) bool {
 
 		n.value = value
 		n.last = x.current
+		n.ttl = ttlTick
 	} else {
 		n := &node[K, V]{
 			key:   key,
 			value: value,
 			last:  x.current,
+			ttl:   ttlTick,
 		}
 		x.bucket[key] = n
-		slot := x.lookupTimeSlot(0)
+		slot := x.timeTable.GetOrCreate(ttlTick + x.current)
 
 		n.link = slot.root.link
 		slot.root.link = n
@@ -104,7 +95,7 @@ func (x *Cache[K, V]) Set(key K, value V) bool {
 }
 
 // Get looks up `key` from cache and return the value if the `key` exists. If key does not exist, it returns empty value of V (actually `n` of `var n V` will be returned)
-func (x *Cache[K, V]) Get(key K) V {
+func (x *CacheTable[K, V]) Get(key K) V {
 	x.bucketMutex.RLock()
 	defer x.bucketMutex.RUnlock()
 
@@ -114,7 +105,7 @@ func (x *Cache[K, V]) Get(key K) V {
 		return null
 	}
 
-	if !x.cfg.noExtend {
+	if x.cfg.extendByGet {
 		n.last = x.current
 	}
 
@@ -122,14 +113,18 @@ func (x *Cache[K, V]) Get(key K) V {
 }
 
 // Elapse puts forward time (tick) of cache table. If a value is expired by forwarding tick, it will be removed from cache table.
-func (x *Cache[K, V]) Elapse(ticks uint64) {
+func (x *CacheTable[K, V]) Elapse(ticks uint64) {
 	x.bucketMutex.RLock()
 	defer x.bucketMutex.RUnlock()
 
 	for i := tick(0); i < tick(ticks); i++ {
 		x.current++
 
-		slot := x.lookupTimeSlot(0)
+		slot := x.timeTable.Get(x.current)
+		if slot == nil {
+			continue
+		}
+
 		for {
 			n := slot.root.pop()
 			if n == nil {
@@ -140,15 +135,27 @@ func (x *Cache[K, V]) Elapse(ticks uint64) {
 				panic("last accessed tick must be less than updated current")
 			}
 
-			diff := x.current - n.last
-			if diff >= x.cfg.ttl {
-				delete(x.bucket, n.key)
-				x.runHook(n.value)
-			} else {
-				if x.cfg.ttl < diff {
-					panic("x.current - n.last must be less than TTL")
+			var extends []tick
+			extends = append(extends, x.runHook(n.value)...)
+
+			if x.cfg.extendByGet {
+				diff := x.current - n.last
+				if diff < n.ttl {
+					extends = append(extends, n.ttl-diff)
 				}
-				x.lookupTimeSlot(x.cfg.ttl - diff).root.push(n)
+			}
+
+			var maxExtend tick
+			for i := range extends {
+				if maxExtend < extends[i] {
+					maxExtend = extends[i]
+				}
+			}
+
+			if maxExtend > 0 {
+				x.timeTable.GetOrCreate(x.current + maxExtend).root.push(n)
+			} else {
+				delete(x.bucket, n.key)
 			}
 		}
 	}

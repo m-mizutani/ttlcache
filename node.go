@@ -3,6 +3,7 @@ package ttlcache
 type node[K comparable, V any] struct {
 	key   K
 	value V
+	ttl   tick
 	last  tick
 	link  *node[K, V]
 }
