@@ -18,6 +18,8 @@ type Cache[K comparable, V any] struct {
 	timeSlots []*timeSlot[K, V]
 	hooks     map[HookID]Hook[V]
 
+	baseHookID HookID
+
 	cfg *config
 }
 

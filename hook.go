@@ -1,19 +1,19 @@
 package ttlcache
 
-import "github.com/google/uuid"
-
 type (
-	HookID string
+	HookID uint64
 
 	Hook[V any] func(V)
 )
 
 // SetHook appends a hook function to be triggered with removing a value. SetHook returns ID or appended hook and it can be used to remove the hook.
 func (x *Cache[K, V]) SetHook(h Hook[V]) HookID {
-	id := HookID(uuid.NewString())
 
 	x.hookMutex.Lock()
 	defer x.hookMutex.Unlock()
+
+	x.baseHookID++
+	id := x.baseHookID
 
 	x.hooks[id] = h
 	return id
