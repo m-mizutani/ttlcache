@@ -145,7 +145,10 @@ func (x *Cache[K, V]) Elapse(ticks uint64) {
 				delete(x.bucket, n.key)
 				x.runHook(n.value)
 			} else {
-				x.lookupTimeSlot(diff).root.push(n)
+				if x.cfg.ttl < diff {
+					panic("x.current - n.last must be less than TTL")
+				}
+				x.lookupTimeSlot(x.cfg.ttl - diff).root.push(n)
 			}
 		}
 	}

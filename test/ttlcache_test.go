@@ -49,6 +49,19 @@ func TestExpires(t *testing.T) {
 		cache.Elapse(4) // expires
 		assert.Equal(t, "", cache.Get(key))
 	})
+
+	t.Run("not expire with access case2", func(t *testing.T) {
+		cache := ttlcache.New[string, string](
+			ttlcache.WithTTL(10),
+		)
+
+		key := "one"
+		cache.Set(key, "void")
+		cache.Elapse(1)
+		assert.Equal(t, "void", cache.Get(key))
+		cache.Elapse(10)
+		assert.Equal(t, "", cache.Get(key))
+	})
 }
 
 func TestNotExtend(t *testing.T) {
