@@ -1,215 +1,150 @@
 package ttlcache
 
 import (
-	"bytes"
-	"hash/fnv"
 	"sync"
-
-	"github.com/google/uuid"
 )
 
-type HookID string
+type (
+	tick uint64
+)
 
-type Hook[T any] func(T)
+// Cache is TTL cache table. It needs to be created by `New` function.
+type Cache[K comparable, V any] struct {
+	current     tick
+	bucketMutex sync.RWMutex
+	hookMutex   sync.RWMutex
 
-type Cache[T any] struct {
-	current   uint64
-	tickMutex sync.Mutex
-	hookMutex sync.RWMutex
+	bucket    map[K]*node[K, V]
+	timeSlots []*timeSlot[K, V]
+	hooks     map[HookID]Hook[V]
 
-	buckets []*bucket[T]
-	timers  []*timer[T]
-	hooks   map[HookID]Hook[T]
+	cfg *config
 }
 
 type config struct {
-	ttl  uint64
-	size uint64
+	noExtend    bool
+	noOverwrite bool
+	ttl         tick
 }
 
 type Option func(cfg *config)
 
-func WithSize(size uint64) Option {
-	return func(cfg *config) {
-		cfg.size = size
-	}
-}
-
+// WithTTL changes time (tick) to live. If you set 4, Elapse(4) will expires cache.
 func WithTTL(ttl uint64) Option {
 	return func(cfg *config) {
-		cfg.ttl = ttl
+		cfg.ttl = tick(ttl)
 	}
 }
 
-func New[T any](options ...Option) *Cache[T] {
+// WithNoExtend stops to extend TTL of value by `Get`
+func WithNoExtend() Option {
+	return func(cfg *config) {
+		cfg.noExtend = true
+	}
+}
+
+// WithNoOverwrite stops to overwrite value by `Set` if key already exists.
+func WithNoOverwrite() Option {
+	return func(cfg *config) {
+		cfg.noOverwrite = true
+	}
+}
+
+// New creates a new `Cache` instance with types K and V. K is for key and V is for value.
+func New[K comparable, V any](options ...Option) *Cache[K, V] {
 	cfg := &config{
-		ttl:  300,
-		size: 1024,
+		ttl: 300,
 	}
 
 	for _, opt := range options {
 		opt(cfg)
 	}
 
-	cache := &Cache[T]{
-		buckets: make([]*bucket[T], cfg.size),
-		timers:  make([]*timer[T], cfg.ttl),
-		hooks:   make(map[HookID]Hook[T]),
+	cache := &Cache[K, V]{
+		cfg:       cfg,
+		bucket:    make(map[K]*node[K, V]),
+		timeSlots: make([]*timeSlot[K, V], cfg.ttl),
+		hooks:     make(map[HookID]Hook[V]),
 	}
-	for i := range cache.buckets {
-		cache.buckets[i] = newBucket[T]()
-	}
-	for i := range cache.timers {
-		cache.timers[i] = newTimer[T]()
+	for i := range cache.timeSlots {
+		cache.timeSlots[i] = newTimeSlot[K, V]()
 	}
 
 	return cache
 }
 
-func (x *Cache[T]) Set(key []byte, value T) {
-	bucket := x.lookupBucket(key)
-	bucket.mutex.Lock()
-	defer bucket.mutex.Unlock()
+// Set inserts a value to cache with predefined TTL. If key already exists, value will be overwritten by default. It always returns `true`, but it returns `false` if WithNoOverwrite enabled and the key already exists.
+func (x *Cache[K, V]) Set(key K, value V) bool {
+	x.bucketMutex.Lock()
+	defer x.bucketMutex.Unlock()
 
-	for p := bucket.root.next; p != nil; p = p.next {
-		// overwrite
-		if bytes.Equal(key, p.key) {
-			p.value = value
-			return
+	if n, ok := x.bucket[key]; ok {
+		if x.cfg.noOverwrite {
+			return false
 		}
-	}
 
-	n := &node[T]{
-		key:    key[:],
-		value:  value,
-		bucket: bucket,
-	}
-
-	bucket.root.attach(n)
-}
-
-func (x *Cache[T]) Get(key []byte) T {
-	bucket := x.lookupBucket(key)
-	bucket.mutex.RLock()
-	defer bucket.mutex.RUnlock()
-
-	for p := bucket.root.next; p != nil; p = p.next {
-		if bytes.Equal(key, p.key) {
-			return p.value
+		n.value = value
+		n.last = x.current
+	} else {
+		n := &node[K, V]{
+			key:   key,
+			value: value,
+			last:  x.current,
 		}
+		x.bucket[key] = n
+		slot := x.lookupTimeSlot(0)
+
+		n.link = slot.root.link
+		slot.root.link = n
 	}
 
-	var null T
-	return null
-}
-
-func (x *Cache[T]) SetHook(h Hook[T]) HookID {
-	id := HookID(uuid.NewString())
-
-	x.hookMutex.Lock()
-	defer x.hookMutex.Unlock()
-
-	x.hooks[id] = h
-	return id
-}
-
-func (x *Cache[T]) DelHook(id HookID) bool {
-	x.hookMutex.Lock()
-	defer x.hookMutex.Unlock()
-
-	if _, ok := x.hooks[id]; !ok {
-		return false
-	}
-	delete(x.hooks, id)
 	return true
 }
 
-func (x *Cache[T]) runHook(v T) {
-	x.hookMutex.RLock()
-	defer x.hookMutex.RUnlock()
+// Get looks up `key` from cache and return the value if the `key` exists. If key does not exist, it returns empty value of V (actually `n` of `var n V` will be returned)
+func (x *Cache[K, V]) Get(key K) V {
+	x.bucketMutex.RLock()
+	defer x.bucketMutex.RUnlock()
 
-	for _, hook := range x.hooks {
-		hook(v)
+	n, ok := x.bucket[key]
+	if !ok {
+		var null V
+		return null
 	}
+
+	if !x.cfg.noExtend {
+		n.last = x.current
+	}
+
+	return n.value
 }
 
-func (x *Cache[T]) Elapse(tick int) {
-	for i := 0; i < tick; i++ {
-		x.current++
-		timer := x.lookupTimer()
+// Elapse puts forward time (tick) of cache table. If a value is expired by forwarding tick, it will be removed from cache table.
+func (x *Cache[K, V]) Elapse(ticks uint64) {
+	x.bucketMutex.RLock()
+	defer x.bucketMutex.RUnlock()
 
-		for n := timer.root.link; n != nil; n = n.link {
-			n.detach()
+	for i := tick(0); i < tick(ticks); i++ {
+		x.current++
+
+		slot := x.lookupTimeSlot(0)
+		for {
+			n := slot.root.pop()
+			if n == nil {
+				break
+			}
+
+			if x.current <= n.last {
+				panic("last accessed tick must be less than updated current")
+			}
+
+			diff := x.current - n.last
+			if diff >= x.cfg.ttl {
+				delete(x.bucket, n.key)
+				x.runHook(n.value)
+			} else {
+				x.lookupTimeSlot(diff).root.push(n)
+			}
 		}
 	}
-}
-
-func (x *Cache[T]) lookupBucket(key []byte) *bucket[T] {
-	idx := hash(key) % uint64(len(x.buckets))
-	return x.buckets[idx]
-}
-
-func (x *Cache[T]) lookupTimer() *timer[T] {
-	idx := x.current % uint64(len(x.timers))
-	return x.timers[idx]
-}
-
-func hash(key []byte) uint64 {
-	if len(key) == 0 {
-		return 0
-	}
-
-	hash := fnv.New64a()
-	hash.Write(key)
-	return hash.Sum64()
-}
-
-type node[T any] struct {
-	key        []byte
-	prev, next *node[T]
-	link       *node[T]
-	value      T
-	bucket     *bucket[T]
-}
-
-func (x *node[T]) attach(n *node[T]) {
-	next := x.next
-	prev := x
-
-	if next != nil {
-		next.prev = n
-	}
-	prev.next = n
-
-	n.next = next
-	n.prev = prev
-}
-
-func (x *node[T]) detach() {
-	next := x.next
-	prev := x.prev
-	if next != nil {
-		next.prev = prev
-	}
-	if prev != nil {
-		prev.next = next
-	}
-	x.prev, x.next = nil, nil
-}
-
-type bucket[T any] struct {
-	mutex sync.RWMutex
-	root  node[T]
-}
-
-func newBucket[T any]() *bucket[T] {
-	return &bucket[T]{}
-}
-
-type timer[T any] struct {
-	root node[T]
-}
-
-func newTimer[T any]() *timer[T] {
-	return &timer[T]{}
 }

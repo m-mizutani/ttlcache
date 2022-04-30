@@ -8,43 +8,94 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCache(t *testing.T) {
-	cache := ttlcache.New[string](
-		ttlcache.WithTTL(4),
-	)
+func TestExpires(t *testing.T) {
+	t.Run("not expire before TTL", func(t *testing.T) {
+		cache := ttlcache.New[string, string](
+			ttlcache.WithTTL(4),
+		)
+		key := "one"
+		cache.Set(key, "void")
+		cache.Elapse(3)
+		assert.Equal(t, "void", cache.Get(key))
+	})
 
-	key := []byte("one")
-	cache.Set(key, "void")
-	cache.Elapse(1)
-	assert.Equal(t, "void", cache.Get(key))
-	cache.Elapse(1)
-	assert.Equal(t, "void", cache.Get(key))
-	cache.Elapse(1) // expired
-	assert.Equal(t, "", cache.Get(key))
+	t.Run("expire cache", func(t *testing.T) {
+		cache := ttlcache.New[string, string](
+			ttlcache.WithTTL(4),
+		)
+		cache.Set("one", "void")
+		cache.Elapse(1)
+		cache.Set("five", "blue")
+		cache.Elapse(3)
+		assert.Equal(t, "", cache.Get("one"))
+		assert.Equal(t, "blue", cache.Get("five"))
+	})
+
+	t.Run("not expire with access", func(t *testing.T) {
+		cache := ttlcache.New[string, string](
+			ttlcache.WithTTL(4),
+		)
+
+		key := "one"
+		cache.Set(key, "void")
+		cache.Elapse(1)
+		assert.Equal(t, "void", cache.Get(key))
+		cache.Elapse(1)
+		assert.Equal(t, "void", cache.Get(key))
+		cache.Elapse(1)
+		assert.Equal(t, "void", cache.Get(key))
+		cache.Elapse(1) // not expired
+		assert.Equal(t, "void", cache.Get(key))
+		cache.Elapse(4) // expires
+		assert.Equal(t, "", cache.Get(key))
+	})
+}
+
+func TestNotExtend(t *testing.T) {
+	t.Run("not expire with access", func(t *testing.T) {
+		cache := ttlcache.New[string, string](
+			ttlcache.WithTTL(4),
+			ttlcache.WithNoExtend(),
+		)
+
+		key := "one"
+		cache.Set(key, "void")
+		cache.Elapse(1)
+		assert.Equal(t, "void", cache.Get(key))
+		cache.Elapse(3)
+		assert.Equal(t, "", cache.Get(key)) // expires even if accessed
+	})
 }
 
 func TestHook(t *testing.T) {
-	var called int
-	hook := func(v string) {
-		called++
-	}
-	cache := ttlcache.New[string](
-		ttlcache.WithTTL(4),
-	)
+	t.Run("run hook by expire cache", func(t *testing.T) {
+		var called int
+		cache := ttlcache.New[string, string](
+			ttlcache.WithTTL(4),
+		)
+		cache.SetHook(func(v string) {
+			called++
+			assert.Equal(t, "void", v)
+		})
+		key := "one"
+		cache.Set(key, "void")
+		cache.Elapse(4)
+		assert.Equal(t, "", cache.Get(key))
+		assert.Equal(t, 1, called)
+	})
 
-	id := cache.SetHook(hook)
-
-	key := []byte("one")
-	cache.Set(key, "void")
-	cache.Elapse(3) // expired
-	assert.Equal(t, "", cache.Get(key))
-
-	assert.Equal(t, 1, called)
-
-	assert.True(t, cache.DelHook(id))
-
-	cache.Set(key, "void")
-	cache.Elapse(3) // expired
-	assert.Equal(t, "", cache.Get(key))
-	assert.Equal(t, 1, called)
+	t.Run("not run deleted hook", func(t *testing.T) {
+		cache := ttlcache.New[string, string](
+			ttlcache.WithTTL(4),
+		)
+		id := cache.SetHook(func(v string) {
+			assert.Fail(t, "hook should not be called")
+		})
+		key := "one"
+		cache.Set(key, "void")
+		cache.Elapse(2)
+		assert.True(t, cache.DelHook(id))
+		cache.Elapse(2)
+		assert.Equal(t, "", cache.Get(key))
+	})
 }
