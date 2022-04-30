@@ -1,9 +1,12 @@
-name: Vuln scan
+name: pkg-scan
 
 on: [push]
 
 jobs:
   scan:
+    permissions:
+      security-events: write
+
     runs-on: ubuntu-latest
 
     steps:

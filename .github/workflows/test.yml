@@ -1,4 +1,4 @@
-name: Test
+name: test
 
 on: [push]
 
@@ -13,7 +13,7 @@ jobs:
           ref: ${{ github.head_ref }}
       - uses: actions/setup-go@v2
         with:
-          go-version: "1.17"
+          go-version: "1.18"
       - run: go test ./...
       - run: go vet ./...
       - run: go test -fuzz FuzzSetAndGet -fuzztime=9s ./test/

@@ -1,4 +1,4 @@
-name: "Gosec"
+name: "gosec"
 
 # Run workflow each time code is pushed to your repository and on a schedule.
 # The scheduled workflow runs every at 00:00 on Sunday UTC time.
@@ -8,6 +8,8 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
     env:
       GO111MODULE: on
     steps:
@@ -17,7 +19,7 @@ jobs:
         uses: securego/gosec@master
         with:
           # we let the report trigger content trigger a failure using the GitHub Security features.
-          args: "-no-fail -fmt sarif -out results.sarif ./..."
+          args: "-no-fail -fmt sarif -out results.sarif ."
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v1
         with:
