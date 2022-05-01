@@ -136,13 +136,12 @@ func (x *CacheTable[K, V]) Elapse(ticks uint64) {
 			}
 
 			var extends []tick
-			extends = append(extends, x.runHook(n.value)...)
 
-			if x.cfg.extendByGet {
-				diff := x.current - n.last
-				if diff < n.ttl {
-					extends = append(extends, n.ttl-diff)
-				}
+			diff := x.current - n.last
+			if diff < n.ttl {
+				extends = append(extends, n.ttl-diff)
+			} else {
+				extends = append(extends, x.runHook(n.value)...)
 			}
 
 			var maxExtend tick
