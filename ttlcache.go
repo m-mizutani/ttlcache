@@ -112,6 +112,21 @@ func (x *CacheTable[K, V]) Get(key K) V {
 	return n.value
 }
 
+// Delete remove `key` item from cache and it returns true if item exists.
+func (x *CacheTable[K, V]) Delete(key K) bool {
+	x.bucketMutex.Lock()
+	defer x.bucketMutex.Unlock()
+
+	n, ok := x.bucket[key]
+	if !ok {
+		return false
+	}
+	delete(x.bucket, key)
+	n.deleted = true
+
+	return true
+}
+
 // Elapse puts forward time (tick) of cache table. If a value is expired by forwarding tick, it will be removed from cache table.
 func (x *CacheTable[K, V]) Elapse(ticks uint64) {
 	x.bucketMutex.RLock()
@@ -129,6 +144,9 @@ func (x *CacheTable[K, V]) Elapse(ticks uint64) {
 			n := slot.root.pop()
 			if n == nil {
 				break
+			}
+			if n.deleted {
+				continue
 			}
 
 			if x.current <= n.last {

@@ -6,6 +6,8 @@ type node[K comparable, V any] struct {
 	ttl   tick
 	last  tick
 	link  *node[K, V]
+
+	deleted bool
 }
 
 func (x *node[K, V]) push(n *node[K, V]) {

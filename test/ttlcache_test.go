@@ -145,3 +145,21 @@ func TestHook(t *testing.T) {
 		assert.Equal(t, "", cache.Get(key))     // finally expired. TTL is extended with 5 tick
 	})
 }
+
+func TestDeleteNode(t *testing.T) {
+	cache := ttlcache.New[string, string]()
+	cache.SetHook(func(v string) uint64 {
+		assert.Equal(t, "will be deleted by Expire", v)
+		return 0
+	})
+
+	cache.Set("a", "will be deleted by Delete", 4)
+	cache.Set("b", "will be deleted by Expire", 4)
+	cache.Elapse(2)
+	assert.True(t, cache.Delete("a"))
+	assert.False(t, cache.Delete("a")) // 2nd delete will be failed, but only returned false
+	assert.Empty(t, cache.Get("a"))
+
+	cache.Elapse(2) // b also deleted by expiring
+	assert.Empty(t, cache.Get("b"))
+}
